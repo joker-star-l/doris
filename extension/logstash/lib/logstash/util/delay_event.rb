@@ -22,7 +22,7 @@ class DelayEvent
 
    def initialize(delay, event)
       @start_time = Time.now.to_i + delay
-      @event = event # event style: [documents, http_headers, event_num, req_count]
+      @event = event # event style: [documents, http_headers, table, event_num, req_count]
    end
 
    def get_delay(unit)
@@ -49,6 +49,6 @@ class DelayEvent
    end
 
    def first_retry
-      @event[3] == 2
+      @event[4] == 2
    end
 end

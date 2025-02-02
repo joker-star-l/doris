@@ -92,14 +92,16 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
       :http_hosts => @http_hosts)
    end
 
+   def http_query(table)
+      "/api/#{@db}/#{table}/_stream_load"
+   end
+
    def register
       @client = OkHttpClient::Builder.new.
          writeTimeout(java.time.Duration::ZERO). # the maximum waiting time for a client to send data to the server, with 0 indicating no limit
          followRedirects(false). # disable the standard redirect, because the authorization
          addInterceptor(RedirectInterceptor.new).
          build
-
-      @http_query = "/api/#{@db}/#{@table}/_stream_load"
 
       @request_headers = make_request_headers
       @logger.info("request headers: ", @request_headers)
@@ -153,8 +155,8 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
       @retry_queue_bytes = java.util.concurrent.atomic.AtomicLong.new(0)
       retry_thread = Thread.new do
          while popped = @retry_queue.take
-            documents, http_headers, event_num, req_count = popped.event
-            handle_request(documents, http_headers, event_num, req_count)
+            documents, http_headers, table, event_num, req_count = popped.event
+            handle_request(documents, http_headers, table, event_num, req_count)
          end
       end
 
@@ -180,19 +182,27 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
 
    private
    def send_events(events)
-      documents = events.map { |event| event_body(event) }.join("\n")
-      event_num = events.size
-
-      # @logger.info("get event num: #{event_num}")
-      @logger.debug("get documents: #{documents}")
-
-      http_headers = @request_headers.dup
-      if !@group_commit
-         # only set label if group_commit is off_mode or not set, since lable can not be used with group_commit
-         http_headers["label"] = @label_prefix + "_" + @db + "_" + @table + "_" + Time.now.strftime('%Y%m%d_%H%M%S_%L_' + SecureRandom.uuid)
+      # key: table, value: [events]
+      events_map = Hash.new { |hash, key| hash[key] = [] }
+      events.each do |event|
+         table = event.sprintf(@table)
+         events_map[table] = events_map[table] << event
       end
 
-      handle_request(documents, http_headers, event_num, 1)
+      events_map.each do |t, es|
+         documents = es.map { |e| event_body(e) }.join("\n")
+         event_num = es.size
+
+         @logger.debug("get documents: #{documents}")
+
+         http_headers = @request_headers.dup
+         unless @group_commit
+            # only set label if group_commit is off_mode or not set, since label can not be used with group_commit
+            http_headers["label"] = @label_prefix + "_" + @db + "_" + t + "_" + Time.now.strftime('%Y%m%d_%H%M%S_%L_' + SecureRandom.uuid)
+         end
+
+         handle_request(documents, http_headers, t, event_num, 1)
+      end
    end
 
    def sleep_for_attempt(attempt)
@@ -202,8 +212,8 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
    end
 
    private
-   def handle_request(documents, http_headers, event_num, req_count)
-      response = make_request(documents, http_headers, @http_query, @http_hosts.sample)
+   def handle_request(documents, http_headers, table, event_num, req_count)
+      response = make_request(documents, http_headers, http_query(table), @http_hosts.sample)
       response_json = {}
       begin
          response = response.body.string
@@ -232,8 +242,8 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
          @logger.warn("FAILED doris stream load response:\n#{response}")
          @logger.warn("DROP this batch after failed #{req_count} times.")
          if @save_on_failure
-            @logger.warn("Try save to disk.Disk file path : #{@save_dir}/#{@table}_#{@save_file}")
-            save_to_disk(documents)
+            @logger.warn("Try save to disk.Disk file path : #{@save_dir}/#{table}_#{@save_file}")
+            save_to_disk(documents, table)
          end
          need_retry = false
       end
@@ -249,7 +259,7 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
       sleep_for = sleep_for_attempt(req_count)
       @logger.warn("FAILED doris stream load response:\n#{response}")
       @logger.warn("Will do the #{req_count}th retry after #{sleep_for} secs.")
-      delay_event = DelayEvent.new(sleep_for, [documents, http_headers, event_num, req_count+1])
+      delay_event = DelayEvent.new(sleep_for, [documents, http_headers, table, event_num, req_count+1])
       add_event_to_retry_queue(delay_event)
    end
 
@@ -265,7 +275,7 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
       request = Request::Builder.new.
          url(url).
          put(RequestBody.create(documents, nil)).
-         headers(Headers.of(@request_headers)).
+         headers(Headers.of(http_headers)).
          build
 
       response = nil
@@ -316,9 +326,9 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
    end
 
    private
-   def save_to_disk(documents)
+   def save_to_disk(documents, table)
       begin
-         file = File.open("#{@save_dir}/#{@db}_#{@table}_#{@save_file}", "a")
+         file = File.open("#{@save_dir}/#{@db}_#{table}_#{@save_file}", "a")
          file.write(documents)
       rescue IOError => e
          log_failure("An error occurred while saving file to disk: #{e}",
