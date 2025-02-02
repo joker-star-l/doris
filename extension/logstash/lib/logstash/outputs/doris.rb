@@ -27,11 +27,14 @@ require "uri"
 require "securerandom"
 require "json"
 require "base64"
-require "restclient"
 require 'thread'
 
+require 'java'
+require Dir["#{File.dirname(__FILE__)}/../../*_jars.rb"].first
 
 class LogStash::Outputs::Doris < LogStash::Outputs::Base
+   include_package 'okhttp3'
+
    # support multi thread concurrency for performance
    # so multi_receive() and function it calls are all stateless and thread safe
    concurrency :shared
@@ -90,6 +93,12 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
    end
 
    def register
+      @client = OkHttpClient::Builder.new.
+         writeTimeout(java.time.Duration::ZERO). # the maximum waiting time for a client to send data to the server, with 0 indicating no limit
+         followRedirects(false). # disable the standard redirect, because the authorization
+         addInterceptor(RedirectInterceptor.new).
+         build
+
       @http_query = "/api/#{@db}/#{@table}/_stream_load"
 
       @request_headers = make_request_headers
@@ -197,7 +206,8 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
       response = make_request(documents, http_headers, @http_query, @http_hosts.sample)
       response_json = {}
       begin
-         response_json = JSON.parse(response.body)
+         response = response.body.string
+         response_json = JSON.parse(response)
       rescue => _
          @logger.warn("doris stream load response is not a valid JSON:\n#{response}")
       end
@@ -252,18 +262,17 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
       end
       @logger.debug("doris stream load request body: #{documents}")
 
-      response = ""
+      request = Request::Builder.new.
+         url(url).
+         put(RequestBody.create(documents, nil)).
+         headers(Headers.of(@request_headers)).
+         build
+
+      response = nil
       begin
-         response = RestClient.put(url, documents, http_headers) { |res, request, result|
-                case res.code
-                when 301, 302, 307
-                    @logger.debug("redirect to: #{res.headers[:location]}")
-                    res.follow_redirection
-                else
-                  res.return!
-                end
-         }
+         response = @client.newCall(request).execute
       rescue => e
+         response&.close
          log_failure("doris stream load request error: #{e}")
       end
 
@@ -331,5 +340,26 @@ class LogStash::Outputs::Doris < LogStash::Outputs::Base
       headers["Authorization"] = "Basic " + Base64.strict_encode64("#{@user}:#{@password.value}")
   
       headers
+   end
+
+   class RedirectInterceptor
+      include Java::okhttp3.Interceptor
+
+      def intercept(chain)
+         request = chain.request
+         response = chain.proceed(request)
+         unless response.isRedirect
+            puts "Not a redirect response"
+            return response
+         end
+         location = response.header("Location")
+         if location == nil
+            puts "Redirect location is nil"
+            return response
+         end
+         response.close
+         puts "Redirecting to #{location}"
+         chain.proceed(request.newBuilder.url(location).build)
+      end
    end
 end # end of class LogStash::Outputs::Doris
