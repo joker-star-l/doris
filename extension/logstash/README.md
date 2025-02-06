@@ -23,6 +23,8 @@ under the License.
 
 2. How to use
 
+   `export JARS_SKIP="true"` https://github.com/elastic/logstash/issues/8041
+
    `https://doris.apache.org/zh-CN/docs/dev/ecosystem/logstash`
    `https://doris.apache.org/docs/dev/ecosystem/logstash`
 

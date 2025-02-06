@@ -1,0 +1,6 @@
+/lib/**.jar
+/lib/*.rb
+
+Gemfile.lock
+logstash-output-doris-*.gem
+logstash-output-doris-*.zip
