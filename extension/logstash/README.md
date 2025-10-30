@@ -19,9 +19,13 @@ under the License.
 
 1. How to build
 
+  `jruby -rjars/installer -e 'Jars::Installer.vendor_jars!'`
+  `bundle install`
 	`gem build logstash-output-doris.gemspec`
 
 2. How to use
+
+   `export JARS_SKIP="true"`
 
    `https://doris.apache.org/zh-CN/docs/dev/ecosystem/logstash`
    `https://doris.apache.org/docs/dev/ecosystem/logstash`
